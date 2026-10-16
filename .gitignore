@@ -1,0 +1,52 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+out/
+
+# CMake / CTest artifacts (in-source runs)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+CMakeUserPresets.json
+
+# Qt generated files
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qm
+*.user
+*.autosave
+
+# Compiled objects / binaries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dSYM/
+*.app/
+*.dmg
+
+# Benchmark data (large generated test books)
+bench/data/
+
+# Logs (e.g. aqtinstall.log from Qt installer)
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+.cache/
+.clangd/
+
+# macOS
+.DS_Store
