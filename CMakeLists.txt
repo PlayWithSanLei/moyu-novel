@@ -31,7 +31,7 @@ else()
     endif()
 endif()
 
-project(MoyuReader VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+project(MoyuReader VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
