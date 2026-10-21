@@ -5,6 +5,7 @@
 #include "core/Database.h"
 #include "mac/GlobalHotkeys.h"
 #include "mac/MacWindow.h"
+#include "reader/ReaderView.h"
 #include "ui/MainWindow.h"
 #include "ui/ReadingStyle.h"
 #include "ui/ReadingTools.h"
@@ -19,6 +20,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QSignalSpy>
@@ -100,6 +102,7 @@ private Q_SLOTS:
     void backStackReturnsToThePreviousPlace();
     void bossHidePausesAutoScroll();
     void searchShortcutOpensPanel();
+    void closingSearchClearsHighlight();
     void readerBackgroundMatchesResizeMargin();
     void shelfListsTitlePercentAndTime();
     void localDropKeepsEveryPath();
@@ -657,6 +660,55 @@ void WindowTest::searchShortcutOpensPanel()
     auto* panel = window.findChild<moyu::SearchPanel*>();
     QVERIFY(panel != nullptr);
     QVERIFY(panel->isVisible());
+}
+
+void WindowTest::closingSearchClearsHighlight()
+{
+    const QString text = QStringLiteral("第1章 甲\n要找的关键字在这里。\n");
+    const QByteArray utf8 = text.toUtf8();
+    moyu::ChapterIndex chapter;
+    chapter.index = 0;
+    chapter.title = QStringLiteral("第1章 甲");
+    chapter.byteEnd = static_cast<quint64>(utf8.size());
+    const moyu::ChapterContent content = moyu::makeChapterContent(chapter, utf8.constData(), static_cast<quint64>(utf8.size()));
+    const quint32 at = static_cast<quint32>(utf8.indexOf(QStringLiteral("关键字").toUtf8()));
+    const quint32 bytes = static_cast<quint32>(QStringLiteral("关键字").toUtf8().size());
+
+    moyu::MainWindow window;
+    window.resize(420, 320);
+    window.showBook({chapter}, content, 0, static_cast<quint64>(utf8.size()), 0);
+    window.show();
+    // 真实流程里会话收到跳转请求后重新 showChapter，这里直接模拟。
+    QObject::connect(&window, &moyu::MainWindow::anchorJumpRequested, &window, [&](quint32, quint32 offset) {
+        window.showChapter(content, 0, static_cast<quint64>(utf8.size()), offset, false);
+    });
+    window.showSearch();
+    auto* panel = window.findChild<moyu::SearchPanel*>();
+    auto* reader = window.findChild<moyu::ReaderView*>();
+    QVERIFY(panel != nullptr);
+    QVERIFY(reader != nullptr);
+
+    Q_EMIT panel->hitChosen(0, at, bytes);
+    QVERIFY(reader->hasHighlight());
+    panel->reject();
+    QVERIFY(!panel->isVisible());
+    QVERIFY(!reader->hasHighlight());
+
+    // 重新打开面板后，旧高亮也不会因为重排章节又冒出来。
+    window.showSearch();
+    window.showChapter(content, 0, static_cast<quint64>(utf8.size()), 0, false);
+    QVERIFY(!reader->hasHighlight());
+
+    // 换关键字搜索时，上一次的高亮先清掉。
+    Q_EMIT panel->hitChosen(0, at, bytes);
+    QVERIFY(reader->hasHighlight());
+    QSignalSpy requested(&window, &moyu::MainWindow::searchRequested);
+    auto* query = panel->findChild<QLineEdit*>();
+    QVERIFY(query != nullptr);
+    query->setText(QStringLiteral("别的"));
+    QTest::keyClick(query, Qt::Key_Return);
+    QCOMPARE(requested.count(), 1);
+    QVERIFY(!reader->hasHighlight());
 }
 
 void WindowTest::readerBackgroundMatchesResizeMargin()

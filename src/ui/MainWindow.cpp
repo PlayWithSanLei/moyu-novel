@@ -373,8 +373,17 @@ void MainWindow::showSearch()
     }
     if (m_search == nullptr) {
         m_search = new SearchPanel(this);
-        connect(m_search, &SearchPanel::searchRequested, this, &MainWindow::searchRequested);
+        connect(m_search, &SearchPanel::searchRequested, this, [this](const QString& text) {
+            // 换了关键字，上一次的高亮已经不对应结果列表了。
+            m_highlightBytes = 0;
+            m_reader->clearHighlight();
+            Q_EMIT searchRequested(text);
+        });
         connect(m_search, &SearchPanel::cancelRequested, this, &MainWindow::searchCancelRequested);
+        connect(m_search, &SearchPanel::dismissed, this, [this] {
+            m_highlightBytes = 0;
+            m_reader->clearHighlight();
+        });
         connect(m_search, &SearchPanel::hitChosen, this, [this](quint32 chapter, quint32 offset, quint32 bytes) {
             prepareJump();
             armHighlight(chapter, offset, bytes);

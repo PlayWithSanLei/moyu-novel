@@ -26,6 +26,9 @@ SearchPanel::SearchPanel(QWidget* parent)
     m_query->setPlaceholderText(QStringLiteral("在全文里查找"));
     auto* search = new QPushButton(QStringLiteral("搜索"), this);
     auto* cancel = new QPushButton(QStringLiteral("取消"), this);
+    // 回车由输入框的 returnPressed 处理；按钮再当默认按钮会把同一次搜索发两遍。
+    search->setAutoDefault(false);
+    cancel->setAutoDefault(false);
     row->addWidget(m_query, 1);
     row->addWidget(search);
     row->addWidget(cancel);
@@ -34,10 +37,8 @@ SearchPanel::SearchPanel(QWidget* parent)
     layout->addWidget(m_results, 1);
     connect(search, &QPushButton::clicked, this, [this] { submit(); });
     connect(m_query, &QLineEdit::returnPressed, this, [this] { submit(); });
-    connect(cancel, &QPushButton::clicked, this, [this] {
-        m_running = false;
-        Q_EMIT cancelRequested();
-    });
+    // 停掉正在跑的搜索交给 hideEvent。
+    connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     connect(m_results, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
         if (item == nullptr) {
             return;
@@ -84,6 +85,7 @@ void SearchPanel::hideEvent(QHideEvent* event)
         m_running = false;
         Q_EMIT cancelRequested();
     }
+    Q_EMIT dismissed();
     QDialog::hideEvent(event);
 }
 

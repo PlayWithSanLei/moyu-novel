@@ -27,6 +27,8 @@ public:
 Q_SIGNALS:
     void searchRequested(QString text);
     void cancelRequested();
+    // 面板关掉就算这次搜索结束了，取消按钮、Esc、关闭窗口都走这里。
+    void dismissed();
     void hitChosen(quint32 chapter, quint32 byteOffset, quint32 needleBytes);
 
 protected:

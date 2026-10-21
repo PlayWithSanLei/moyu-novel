@@ -51,6 +51,7 @@ public:
     bool autoScrollRunning() const;
     void setHighlight(quint32 chapter, quint32 byteOffset, quint32 length);
     void clearHighlight();
+    bool hasHighlight() const { return m_highlight.active; }
     void setPaintProbe(std::function<void(qint64)> probe);
 
     quint32 byteOffsetInChapter();
