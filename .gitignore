@@ -50,3 +50,10 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Android / Gradle
+.gradle/
+local.properties
+*.jks
+*.keystore
+.kotlin/
