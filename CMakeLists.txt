@@ -58,10 +58,10 @@ if(MOYU_SANITIZE AND CMAKE_OSX_ARCHITECTURES MATCHES ";")
 endif()
 
 # 不把版本号钉死在某个 6.8.x。官方在线安装器里 6.8 系列的最新开源版即可。
-find_package(Qt6 6.8 QUIET CONFIG COMPONENTS Widgets Test Sql)
+find_package(Qt6 6.8 QUIET CONFIG COMPONENTS Widgets Test Sql Network)
 if(NOT Qt6_FOUND)
     message(FATAL_ERROR
-        "找不到 Qt 6.8 或更高版本（需要 Widgets、Test 和 Sql，三者都在 qtbase 里）。\n"
+        "找不到 Qt 6.8 或更高版本（需要 Widgets、Test、Sql 和 Network，都在 qtbase 里）。\n"
         "\n"
         "请用 Qt 官方在线安装器安装 6.8 系列的最新开源版，组件勾选 macOS。\n"
         "安装目录应类似：\n"
@@ -241,6 +241,8 @@ qt_add_library(moyu_core STATIC
     src/core/Fingerprint.h
     src/core/MappedFile.cpp
     src/core/MappedFile.h
+    src/core/SpeechText.cpp
+    src/core/SpeechText.h
     src/core/TextSearch.cpp
     src/core/TextSearch.h
     src/core/Paths.h
@@ -279,6 +281,13 @@ qt_add_library(moyu_ui STATIC
     src/app/BookSession.h
     src/app/Hotkeys.cpp
     src/app/Hotkeys.h
+    src/app/MimoSpeech.cpp
+    src/app/MimoSpeech.h
+    src/app/ReadAloud.cpp
+    src/app/ReadAloud.h
+    src/app/SpeechEngine.h
+    src/app/SpeechSettings.cpp
+    src/app/SpeechSettings.h
     src/app/StartupTiming.cpp
     src/app/StartupTiming.h
     src/app/StealthPolicy.h
@@ -299,6 +308,8 @@ qt_add_library(moyu_ui STATIC
     src/ui/TocDrawer.cpp
     src/ui/TocDrawer.h
     src/ui/WindowGeometry.h
+    src/mac/AudioPlayer.h
+    src/mac/AudioPlayer.mm
     src/mac/GlobalHotkeys.h
     src/mac/GlobalHotkeys.mm
     src/mac/MacWindow.h
@@ -306,7 +317,7 @@ qt_add_library(moyu_ui STATIC
 )
 target_include_directories(moyu_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(moyu_ui PUBLIC QT_NO_KEYWORDS)
-target_link_libraries(moyu_ui PUBLIC moyu_core Qt6::Widgets "-framework Cocoa" "-framework Carbon")
+target_link_libraries(moyu_ui PUBLIC moyu_core Qt6::Widgets Qt6::Network "-framework Cocoa" "-framework Carbon" "-framework AVFoundation")
 moyu_apply_warnings(moyu_ui)
 
 # 目标名和可执行文件名保持 ASCII。用户看到的中文名只写在 Info.plist 里。
@@ -337,6 +348,10 @@ qt_add_executable(moyu_reader_tests tests/test_reader.cpp)
 target_link_libraries(moyu_reader_tests PRIVATE moyu_ui Qt6::Test)
 moyu_apply_warnings(moyu_reader_tests)
 
+qt_add_executable(moyu_speech_tests tests/test_speech.cpp)
+target_link_libraries(moyu_speech_tests PRIVATE moyu_ui Qt6::Test)
+moyu_apply_warnings(moyu_speech_tests)
+
 # 不进 ctest。大文件的耗时单独跑。
 qt_add_executable(moyu_bench bench/bench_open.cpp)
 target_link_libraries(moyu_bench PRIVATE moyu_core)
@@ -346,6 +361,7 @@ enable_testing()
 add_test(NAME window COMMAND moyu_window_tests)
 add_test(NAME core COMMAND moyu_core_tests)
 add_test(NAME reader COMMAND moyu_reader_tests)
+add_test(NAME speech COMMAND moyu_speech_tests)
 
 # Qt6_DIR 是 .../lib/cmake/Qt6，插件在 .../macos/plugins。
 # 测试进程不在 Qt 的 bin 旁边启动，QSQLITE 需要这条路径。

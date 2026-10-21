@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Hotkeys.h"
+#include "app/SpeechSettings.h"
 #include "core/Types.h"
 #include "ui/ReadingStyle.h"
 #include "ui/StatusMenu.h"
@@ -17,8 +18,12 @@ namespace moyu {
 class BookSession;
 class Database;
 class GlobalHotkeys;
+class MacAudioOutput;
+class MimoSpeechEngine;
+class ReadAloud;
 class MainWindow;
 class SettingsDialog;
+enum class PreviewState;
 class ShelfDialog;
 
 class Application {
@@ -50,6 +55,16 @@ private:
     void openShelfEntry(qint64 bookId);
     void askRelocate(qint64 bookId, const QString& title, const QString& oldPath);
     int chordSlot(HotkeyRole role) const;
+    void wireSpeech();
+    void applySpeechSettings();
+    void toggleSpeech();
+    void startSpeechAt(quint32 chapter, quint32 byteOffset);
+    void stopSpeech();
+    void previewSpeech(const QString& text);
+    void stopPreview();
+    void showPreviewState(PreviewState state, const QString& message = {});
+    void syncSpeechActions();
+    void syncSpeechStatus();
 
     std::unique_ptr<Database> m_database;
     std::unique_ptr<BookSession> m_session;
@@ -59,6 +74,8 @@ private:
     QAction* m_dockAction = nullptr;
     QAction* m_pageAction = nullptr;
     QAction* m_autoAction = nullptr;
+    QAction* m_speakAction = nullptr;
+    QAction* m_stopSpeakAction = nullptr;
     StatusMenu m_status;
     QSystemTrayIcon* m_tray = nullptr;
     GlobalHotkeys* m_hotkeys = nullptr;
@@ -75,6 +92,16 @@ private:
     bool m_loading = false;
     bool m_dirty = false;
     bool m_syncing = false;
+
+    SpeechSettings m_speechSettings;
+    MimoSpeechEngine* m_mimo = nullptr;
+    MacAudioOutput* m_audio = nullptr;
+    ReadAloud* m_speech = nullptr;
+    // 试听另起一个引擎，不和朗读队列抢请求号。
+    MimoSpeechEngine* m_previewEngine = nullptr;
+    quint64 m_previewRequest = 0;
+    bool m_previewPlaying = false;
+    bool m_resumeSpeechAfterBoss = false;
 };
 
 }  // namespace moyu

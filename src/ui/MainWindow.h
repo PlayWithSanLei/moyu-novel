@@ -81,6 +81,15 @@ public:
     void addSearchHits(const std::vector<SearchHitInfo>& hits, bool done);
     void setBookmarkList(const std::vector<Bookmark>& bookmarks);
     void armHighlight(quint32 chapter, quint32 offset, quint32 bytes);
+    const ChapterContent* loadedChapter(quint32 index) const;
+    quint32 anchorOffset() const;
+    // 朗读到新的一段：不在屏幕上就翻过去；开了跟读标记就标出来。
+    void followSpeech(quint32 chapter, quint32 byteStart, quint32 byteEnd);
+    void setSpeechMarkStyle(bool on, const QColor& color);
+    void clearSpeechMark();
+    void setSpeechActive(bool on) { m_speechActive = on; }
+    // 显示在状态栏末尾，空字符串表示不显示。
+    void setSpeechStatus(const QString& text);
 
 Q_SIGNALS:
     void openFileRequested(QString path);
@@ -98,6 +107,10 @@ Q_SIGNALS:
     void geometryChanged(QRect geometry);
     // 先藏窗口，再发这个信号。槽里去排队保存进度，不要在槽里同步等数据库。
     void bossHidden();
+    void bossShown();
+    void speechToggleRequested();
+    void speechStopRequested();
+    void speechStartAtRequested(quint32 chapter, quint32 byteOffset);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -159,6 +172,10 @@ private:
     std::vector<Place> m_back;
     SearchPanel* m_search = nullptr;
     BookmarkDialog* m_bookmarks = nullptr;
+    bool m_speechMarkOn = false;
+    bool m_speechActive = false;
+    QString m_speechStatus;
+    QColor m_speechMarkColor;
 };
 
 }  // namespace moyu

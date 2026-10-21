@@ -1,11 +1,14 @@
 #include "app/Application.h"
 
 #include "app/BookSession.h"
+#include "app/MimoSpeech.h"
+#include "app/ReadAloud.h"
 #include "parser/OpenBook.h"
 #include "app/StartupTiming.h"
 #include "app/StealthPolicy.h"
 #include "core/Database.h"
 #include "core/Paths.h"
+#include "mac/AudioPlayer.h"
 #include "mac/GlobalHotkeys.h"
 #include "mac/MacWindow.h"
 #include "ui/MainWindow.h"
@@ -24,6 +27,7 @@
 #include <QSystemTrayIcon>
 #include <QTimer>
 
+#include <algorithm>
 #include <limits>
 
 namespace moyu {
@@ -66,8 +70,14 @@ Application::Application()
     m_saveTimer->setSingleShot(true);
     m_saveTimer->setInterval(300);
     QObject::connect(m_saveTimer, &QTimer::timeout, m_window.get(), [this] { savePreferences(); });
+    m_mimo = new MimoSpeechEngine(m_window.get());
+    m_previewEngine = new MimoSpeechEngine(m_window.get());
+    m_audio = new MacAudioOutput(m_window.get());
+    m_speech = new ReadAloud(m_mimo, m_audio, m_window.get());
     createMenu();
     wire();
+    wireSpeech();
+    applySpeechSettings();
     if (!opened) {
         const QString message = m_database->errorString().isEmpty()
                                     ? QStringLiteral("无法打开数据库")
@@ -288,6 +298,16 @@ void Application::createMenu()
     QObject::connect(addMark, &QAction::triggered, m_window.get(), [this] { m_window->addBookmarkHere(); });
     QAction* marks = readMenu->addAction(QStringLiteral("书签…"));
     QObject::connect(marks, &QAction::triggered, m_window.get(), [this] { m_window->showBookmarks(); });
+    readMenu->addSeparator();
+    m_speakAction = readMenu->addAction(QStringLiteral("朗读"));
+    m_speakAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+    m_speakAction->setShortcutContext(Qt::WidgetShortcut);
+    QObject::connect(m_speakAction, &QAction::triggered, m_window.get(), [this] { toggleSpeech(); });
+    m_stopSpeakAction = readMenu->addAction(QStringLiteral("停止朗读"));
+    m_stopSpeakAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
+    m_stopSpeakAction->setShortcutContext(Qt::WidgetShortcut);
+    m_stopSpeakAction->setEnabled(false);
+    QObject::connect(m_stopSpeakAction, &QAction::triggered, m_window.get(), [this] { stopSpeech(); });
 
     m_status = createStatusMenu(m_window.get());
     QObject::connect(m_status.showWindow, &QAction::triggered, m_window.get(), [this] { m_window->showForBoss(); });
@@ -458,7 +478,11 @@ void Application::loadPreferences()
         QStringLiteral("reading/autoScroll"),
         QStringLiteral("chapters/customRegex"),
     };
-    m_database->requestSettings(m_window.get(), keys, [this](const std::vector<std::pair<QString, QString>>& items) {
+    std::vector<QString> allKeys = keys;
+    for (const QString& key : speechSettingKeys()) {
+        allKeys.push_back(key);
+    }
+    m_database->requestSettings(m_window.get(), allKeys, [this](const std::vector<std::pair<QString, QString>>& items) {
         m_loading = true;
         m_style = readingStyleFromItems(items, m_style);
         m_window->applyAppearance(m_style);
@@ -485,6 +509,8 @@ void Application::loadPreferences()
         if (flagFrom(settingValue(items, QStringLiteral("window/clickThrough")), false)) {
             requestClickThrough(true);
         }
+        m_speechSettings = speechSettingsFromItems(items, m_speechSettings);
+        applySpeechSettings();
         m_chapterPattern = settingValue(items, QStringLiteral("chapters/customRegex"));
         m_session->setChapterPattern(m_chapterPattern);
         const bool pageMode = flagFrom(settingValue(items, QStringLiteral("reading/pageMode")), false);
@@ -503,6 +529,7 @@ void Application::loadPreferences()
             m_settings->setReadingStyle(m_style);
             m_settings->setHideOnBlur(m_hideOnBlur);
             m_settings->setChapterPattern(m_chapterPattern);
+            m_settings->setSpeechSettings(m_speechSettings);
             for (HotkeyRole role : {HotkeyRole::Boss, HotkeyRole::NextPage, HotkeyRole::PreviousPage, HotkeyRole::ToggleClickThrough}) {
                 m_settings->setHotkey(role, m_chords[chordSlot(role)]);
             }
@@ -537,6 +564,9 @@ void Application::savePreferences()
     items.emplace_back(QStringLiteral("reading/pageMode"), m_window->pageMode() ? QStringLiteral("1") : QStringLiteral("0"));
     items.emplace_back(QStringLiteral("reading/autoScroll"), m_window->autoScroll() ? QStringLiteral("1") : QStringLiteral("0"));
     items.emplace_back(QStringLiteral("chapters/customRegex"), m_chapterPattern);
+    for (auto& item : speechSettingsItems(m_speechSettings)) {
+        items.push_back(std::move(item));
+    }
     m_database->setSettingsAsync(items);
 }
 
@@ -734,7 +764,17 @@ void Application::showSettings()
         QObject::connect(m_settings, &SettingsDialog::regenerateRequested, m_window.get(), [this] {
             m_session->regenerateChapters();
         });
+        QObject::connect(m_settings, &SettingsDialog::speechEdited, m_window.get(), [this](const SpeechSettings& settings) {
+            m_speechSettings = settings;
+            applySpeechSettings();
+            scheduleSave();
+        });
+        QObject::connect(m_settings, &SettingsDialog::speechPreviewRequested, m_window.get(), [this](const QString& text) {
+            previewSpeech(text);
+        });
+        QObject::connect(m_settings, &SettingsDialog::speechPreviewStopRequested, m_window.get(), [this] { stopPreview(); });
         QObject::connect(m_settings, &QDialog::finished, m_window.get(), [this] {
+            stopPreview();
             m_window->setSuspendBlurHide(false);
         });
     }
@@ -743,12 +783,224 @@ void Application::showSettings()
     m_settings->setHideFromDock(m_hideDock);
     m_settings->setHideOnBlur(m_hideOnBlur);
     m_settings->setChapterPattern(m_chapterPattern);
+    m_settings->setSpeechSettings(m_speechSettings);
     for (HotkeyRole role : {HotkeyRole::Boss, HotkeyRole::NextPage, HotkeyRole::PreviousPage, HotkeyRole::ToggleClickThrough}) {
         m_settings->setHotkey(role, m_chords[chordSlot(role)]);
     }
     m_window->setSuspendBlurHide(true);
     m_settings->show();
     m_settings->raise();
+}
+
+void Application::wireSpeech()
+{
+    QObject::connect(m_window.get(), &MainWindow::speechToggleRequested, m_window.get(), [this] { toggleSpeech(); });
+    QObject::connect(m_window.get(), &MainWindow::speechStopRequested, m_window.get(), [this] { stopSpeech(); });
+    QObject::connect(m_window.get(), &MainWindow::speechStartAtRequested, m_window.get(), [this](quint32 chapter, quint32 offset) {
+        startSpeechAt(chapter, offset);
+    });
+    QObject::connect(m_speech, &ReadAloud::segmentStarted, m_window.get(), [this](quint32 chapter, quint32 start, quint32 end) {
+        m_window->followSpeech(chapter, start, end);
+    });
+    QObject::connect(m_speech, &ReadAloud::chapterNeeded, m_window.get(), [this](quint32 index) {
+        if (const ChapterContent* loaded = m_window->loadedChapter(index)) {
+            const ChapterContent copy = *loaded;
+            m_speech->offerChapter(copy);
+            return;
+        }
+        // 结果从 neighborReady 回来，下面统一转给朗读。
+        m_session->requestNeighbor(index);
+    });
+    QObject::connect(m_session.get(), &BookSession::neighborReady, m_window.get(), [this](const ChapterContent& content) {
+        m_speech->offerChapter(content);
+    });
+    QObject::connect(m_session.get(), &BookSession::chapterReady, m_window.get(), [this](const ChapterContent& content) {
+        m_speech->offerChapter(content);
+    });
+    // 换书、关书都停。
+    QObject::connect(m_session.get(), &BookSession::bookReady, m_window.get(), [this] { stopSpeech(); });
+    QObject::connect(m_session.get(), &BookSession::bookCleared, m_window.get(), [this] { stopSpeech(); });
+    QObject::connect(m_speech, &ReadAloud::notice, m_window.get(), [this](const QString& message) {
+        m_window->showToast(message);
+    });
+    QObject::connect(m_speech, &ReadAloud::stateChanged, m_window.get(), [this](ReadAloudState state) {
+        if (state == ReadAloudState::Idle) {
+            m_window->clearSpeechMark();
+            m_resumeSpeechAfterBoss = false;
+        }
+        m_window->setSpeechActive(state != ReadAloudState::Idle);
+        syncSpeechActions();
+        syncSpeechStatus();
+    });
+    QObject::connect(m_speech, &ReadAloud::bufferingChanged, m_window.get(), [this] { syncSpeechStatus(); });
+    // 老板键藏窗口时声音也得停，叫回来再接着读。
+    QObject::connect(m_window.get(), &MainWindow::bossHidden, m_window.get(), [this] {
+        if (m_speech->state() == ReadAloudState::Playing) {
+            m_speech->pause();
+            m_resumeSpeechAfterBoss = true;
+        }
+        stopPreview();
+    });
+    QObject::connect(m_window.get(), &MainWindow::bossShown, m_window.get(), [this] {
+        if (m_resumeSpeechAfterBoss) {
+            m_resumeSpeechAfterBoss = false;
+            m_speech->resume();
+        }
+    });
+    QObject::connect(m_previewEngine, &SpeechEngine::finished, m_window.get(), [this](quint64 request, const SpeechResult& result) {
+        if (request != m_previewRequest) {
+            return;
+        }
+        m_previewRequest = 0;
+        if (result.failure != SpeechFailure::None) {
+            showPreviewState(PreviewState::Idle, QStringLiteral("试听失败：%1").arg(result.message));
+            return;
+        }
+        if (m_speech->state() != ReadAloudState::Idle) {
+            showPreviewState(PreviewState::Idle);
+            return;
+        }
+        if (!m_audio->play(result.audio)) {
+            showPreviewState(PreviewState::Idle, QStringLiteral("音频播放不了"));
+            return;
+        }
+        m_previewPlaying = true;
+        showPreviewState(PreviewState::Playing);
+    });
+    QObject::connect(m_audio, &AudioOutput::finished, m_window.get(), [this] {
+        if (m_previewPlaying) {
+            m_previewPlaying = false;
+            showPreviewState(PreviewState::Idle);
+        }
+    });
+}
+
+void Application::applySpeechSettings()
+{
+    MimoConfig config;
+    config.apiKey = m_speechSettings.apiKey;
+    config.voice = m_speechSettings.voice;
+    config.style = m_speechSettings.effectiveStyle();
+    m_mimo->setConfig(config);
+    m_previewEngine->setConfig(config);
+    m_speech->setRate(m_speechSettings.ratePercent / 100.0);
+    m_window->setSpeechMarkStyle(m_speechSettings.mark, m_speechSettings.markColor);
+}
+
+void Application::toggleSpeech()
+{
+    switch (m_speech->state()) {
+    case ReadAloudState::Playing:
+        m_speech->pause();
+        m_window->showToast(QStringLiteral("朗读已暂停"));
+        return;
+    case ReadAloudState::Paused:
+        m_resumeSpeechAfterBoss = false;
+        m_speech->resume();
+        m_window->showToast(QStringLiteral("继续朗读"));
+        return;
+    case ReadAloudState::Idle:
+        break;
+    }
+    if (!m_window->hasBook()) {
+        m_window->showToast(QStringLiteral("先打开一本书"));
+        return;
+    }
+    startSpeechAt(m_window->chapterIndex(), m_window->anchorOffset());
+}
+
+void Application::startSpeechAt(quint32 chapter, quint32 byteOffset)
+{
+    if (m_speechSettings.apiKey.isEmpty()) {
+        m_window->showToast(QStringLiteral("先到 设置 → 听书 填写 MiMo API Key"));
+        showSettings();
+        return;
+    }
+    const ChapterContent* content = m_window->loadedChapter(chapter);
+    if (content == nullptr) {
+        m_window->showToast(QStringLiteral("先打开一本书"));
+        return;
+    }
+    // 先停掉试听，免得和朗读抢扬声器。正在读的话从新位置重来。
+    stopPreview();
+    m_resumeSpeechAfterBoss = false;
+    const ChapterContent copy = *content;
+    m_speech->start(copy, byteOffset, static_cast<quint32>(std::max(0, m_window->chapterCount())));
+    if (m_speech->buffering()) {
+        // 第一段要等 MiMo 合成完才有声音，通常几秒。
+        m_window->showToast(QStringLiteral("正在合成第一段，稍等几秒…"));
+    }
+}
+
+void Application::stopSpeech()
+{
+    if (m_speech->state() == ReadAloudState::Idle) {
+        return;
+    }
+    m_speech->stop();
+    m_window->showToast(QStringLiteral("朗读已停止"));
+}
+
+void Application::previewSpeech(const QString& text)
+{
+    if (m_speech->state() != ReadAloudState::Idle) {
+        showPreviewState(PreviewState::Idle, QStringLiteral("正在朗读，先停止再试听"));
+        return;
+    }
+    if (m_speechSettings.apiKey.isEmpty()) {
+        showPreviewState(PreviewState::Idle, QStringLiteral("先填写上面的 API Key"));
+        return;
+    }
+    stopPreview();
+    m_previewRequest = m_previewEngine->synthesize(text);
+    showPreviewState(PreviewState::Synthesizing);
+}
+
+void Application::stopPreview()
+{
+    m_previewEngine->cancelAll();
+    m_previewRequest = 0;
+    if (m_previewPlaying) {
+        m_previewPlaying = false;
+        m_audio->stop();
+    }
+    showPreviewState(PreviewState::Idle);
+}
+
+void Application::showPreviewState(PreviewState state, const QString& message)
+{
+    if (m_settings != nullptr) {
+        m_settings->setPreviewState(state, message);
+    }
+}
+
+void Application::syncSpeechStatus()
+{
+    QString text;
+    switch (m_speech->state()) {
+    case ReadAloudState::Idle:
+        break;
+    case ReadAloudState::Paused:
+        text = QStringLiteral("朗读已暂停");
+        break;
+    case ReadAloudState::Playing:
+        text = m_speech->buffering() ? QStringLiteral("合成中…") : QStringLiteral("朗读中");
+        break;
+    }
+    m_window->setSpeechStatus(text);
+}
+
+void Application::syncSpeechActions()
+{
+    const ReadAloudState state = m_speech->state();
+    if (m_speakAction != nullptr) {
+        m_speakAction->setText(state == ReadAloudState::Playing  ? QStringLiteral("暂停朗读")
+                               : state == ReadAloudState::Paused ? QStringLiteral("继续朗读")
+                                                                 : QStringLiteral("朗读"));
+    }
+    if (m_stopSpeakAction != nullptr) {
+        m_stopSpeakAction->setEnabled(state != ReadAloudState::Idle);
+    }
 }
 
 }  // namespace moyu

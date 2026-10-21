@@ -1,5 +1,7 @@
 #include "ui/SettingsDialog.h"
 
+#include "core/SpeechText.h"
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
@@ -8,6 +10,9 @@
 #include <QFormLayout>
 #include <QHideEvent>
 #include <QHBoxLayout>
+#include <QIcon>
+#include <QPixmap>
+#include <QPlainTextEdit>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,6 +20,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 namespace moyu {
@@ -72,14 +78,18 @@ SettingsDialog::SettingsDialog(QWidget* parent)
 {
     setWindowTitle(QStringLiteral("设置"));
     setModal(false);
-    resize(420, 560);
+    resize(440, 600);
     for (HotkeyRole role : kRoles) {
         m_chords[roleIndex(role)] = defaultChord(role);
     }
 
     auto* layout = new QVBoxLayout(this);
-    auto* form = new QFormLayout();
-    layout->addLayout(form);
+    auto* tabs = new QTabWidget(this);
+    layout->addWidget(tabs, 1);
+    auto* readingPage = new QWidget(tabs);
+    auto* form = new QFormLayout(readingPage);
+    tabs->addTab(readingPage, QStringLiteral("阅读"));
+    tabs->addTab(buildSpeechPage(), QStringLiteral("听书"));
 
     m_preset = new QComboBox(this);
     fillPresets();
@@ -325,6 +335,159 @@ void SettingsDialog::beginRecord(HotkeyRole role)
     m_recordRole = role;
     updateHotkeyButton(role);
     qApp->installEventFilter(this);
+}
+
+QWidget* SettingsDialog::buildSpeechPage()
+{
+    auto* page = new QWidget(this);
+    auto* form = new QFormLayout(page);
+
+    m_apiKey = new QLineEdit(page);
+    m_apiKey->setEchoMode(QLineEdit::Password);
+    m_apiKey->setPlaceholderText(QStringLiteral("小米 MiMo 开放平台的 API Key"));
+    auto* showKey = new QCheckBox(QStringLiteral("显示"), page);
+    auto* keyRow = new QHBoxLayout();
+    keyRow->addWidget(m_apiKey, 1);
+    keyRow->addWidget(showKey);
+    form->addRow(QStringLiteral("API Key"), keyRow);
+    auto* keyHint = new QLabel(QStringLiteral("在 <a href=\"https://mimo.mi.com\">mimo.mi.com</a> 控制台申请。"
+                                              "Key 只存在本机，朗读时正文会发给 MiMo 合成。"),
+                               page);
+    keyHint->setOpenExternalLinks(true);
+    keyHint->setWordWrap(true);
+    form->addRow(QString(), keyHint);
+
+    m_voice = new QComboBox(page);
+    for (const QString& voice : speechVoices()) {
+        m_voice->addItem(voice);
+    }
+    form->addRow(QStringLiteral("音色"), m_voice);
+
+    m_speechStyle = new QLineEdit(page);
+    m_speechStyle->setPlaceholderText(QString::fromUtf8(kDefaultSpeechStyle));
+    form->addRow(QStringLiteral("语气"), m_speechStyle);
+
+    m_speechRate = makeSlider(50, 200, m_speech.ratePercent, page);
+    m_speechRate->setSingleStep(10);
+    m_speechRate->setPageStep(10);
+    form->addRow(QStringLiteral("语速 %"), m_speechRate);
+
+    m_speechMark = new QCheckBox(QStringLiteral("朗读时标出当前段"), page);
+    m_markColor = new QPushButton(QStringLiteral("标记色"), page);
+    auto* markRow = new QHBoxLayout();
+    markRow->addWidget(m_speechMark, 1);
+    markRow->addWidget(m_markColor);
+    form->addRow(QString(), markRow);
+    form->addRow(QString(), new QLabel(QStringLiteral("Command+R 朗读 / 暂停，Shift+Command+R 停止。"), page));
+
+    // 用上面的音色、语气、语速读这段文字。
+    m_previewText = new QPlainTextEdit(page);
+    m_previewText->setPlainText(QStringLiteral("天色渐晚，他推开客栈的门。掌柜抬头看了他一眼，低声说：“客官，今晚怕是没有空房了。”"));
+    m_previewText->setPlaceholderText(QStringLiteral("写一段想听的文字"));
+    m_previewText->setFixedHeight(m_previewText->fontMetrics().lineSpacing() * 4 + 12);
+    form->addRow(QStringLiteral("试听文字"), m_previewText);
+    m_previewButton = new QPushButton(QStringLiteral("试听"), page);
+    m_previewStatus = new QLabel(page);
+    m_previewStatus->setWordWrap(true);
+    auto* previewRow = new QHBoxLayout();
+    previewRow->addWidget(m_previewButton);
+    previewRow->addWidget(m_previewStatus, 1);
+    form->addRow(QString(), previewRow);
+
+    connect(showKey, &QCheckBox::toggled, this, [this](bool on) {
+        m_apiKey->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
+    });
+    connect(m_apiKey, &QLineEdit::textChanged, this, [this] { emitSpeech(); });
+    connect(m_voice, &QComboBox::currentIndexChanged, this, [this] { emitSpeech(); });
+    connect(m_speechStyle, &QLineEdit::textChanged, this, [this] { emitSpeech(); });
+    connect(m_speechRate, &QSlider::valueChanged, this, [this] { emitSpeech(); });
+    connect(m_speechMark, &QCheckBox::toggled, this, [this] { emitSpeech(); });
+    connect(m_previewButton, &QPushButton::clicked, this, [this] {
+        if (m_previewState != PreviewState::Idle) {
+            Q_EMIT speechPreviewStopRequested();
+            return;
+        }
+        const QString text = m_previewText->toPlainText().trimmed();
+        if (text.isEmpty()) {
+            setPreviewState(PreviewState::Idle, QStringLiteral("先写点要试听的文字"));
+            return;
+        }
+        if (text.size() > kMaxSpeechSegmentChars) {
+            setPreviewState(PreviewState::Idle, QStringLiteral("试听最多 %1 个字").arg(kMaxSpeechSegmentChars));
+            return;
+        }
+        Q_EMIT speechPreviewRequested(text);
+    });
+    connect(m_markColor, &QPushButton::clicked, this, [this] {
+        const QColor picked = QColorDialog::getColor(m_speech.markColor,
+                                                     this,
+                                                     QStringLiteral("标记色"),
+                                                     QColorDialog::ShowAlphaChannel);
+        if (!picked.isValid()) {
+            return;
+        }
+        m_speech.markColor = picked;
+        updateMarkColorButton();
+        emitSpeech();
+    });
+    updateMarkColorButton();
+    return page;
+}
+
+void SettingsDialog::setPreviewState(PreviewState state, const QString& message)
+{
+    m_previewState = state;
+    m_previewButton->setText(state == PreviewState::Idle ? QStringLiteral("试听") : QStringLiteral("停止"));
+    if (!message.isEmpty()) {
+        m_previewStatus->setText(message);
+        return;
+    }
+    switch (state) {
+    case PreviewState::Idle:
+        m_previewStatus->clear();
+        break;
+    case PreviewState::Synthesizing:
+        m_previewStatus->setText(QStringLiteral("合成中…"));
+        break;
+    case PreviewState::Playing:
+        m_previewStatus->setText(QStringLiteral("播放中"));
+        break;
+    }
+}
+
+void SettingsDialog::updateMarkColorButton()
+{
+    // 色块画在按钮左边，透明度也看得出来。
+    QPixmap swatch(14, 14);
+    swatch.fill(m_speech.markColor);
+    m_markColor->setIcon(QIcon(swatch));
+}
+
+void SettingsDialog::setSpeechSettings(const SpeechSettings& settings)
+{
+    m_applying = true;
+    m_speech = settings;
+    m_apiKey->setText(settings.apiKey);
+    const int voice = m_voice->findText(settings.voice);
+    m_voice->setCurrentIndex(voice >= 0 ? voice : 0);
+    m_speechStyle->setText(settings.style);
+    m_speechRate->setValue(settings.ratePercent);
+    m_speechMark->setChecked(settings.mark);
+    updateMarkColorButton();
+    m_applying = false;
+}
+
+void SettingsDialog::emitSpeech()
+{
+    if (m_applying) {
+        return;
+    }
+    m_speech.apiKey = m_apiKey->text().trimmed();
+    m_speech.voice = m_voice->currentText();
+    m_speech.style = m_speechStyle->text();
+    m_speech.ratePercent = m_speechRate->value();
+    m_speech.mark = m_speechMark->isChecked();
+    Q_EMIT speechEdited(m_speech);
 }
 
 ReadingStyle SettingsDialog::collect() const

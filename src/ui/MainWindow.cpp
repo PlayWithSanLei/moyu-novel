@@ -11,6 +11,8 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QLabel>
+#include <QMenu>
+#include <QContextMenuEvent>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QMoveEvent>
@@ -104,6 +106,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(bookmarkShortcut, &QShortcut::activated, this, [this] { addBookmarkHere(); });
     auto* jumpShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_G), this);
     connect(jumpShortcut, &QShortcut::activated, this, [this] { showJump(); });
+    auto* speakShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_R), this);
+    connect(speakShortcut, &QShortcut::activated, this, [this] { Q_EMIT speechToggleRequested(); });
+    auto* stopSpeakShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R), this);
+    connect(stopSpeakShortcut, &QShortcut::activated, this, [this] { Q_EMIT speechStopRequested(); });
     // Command+W 只关窗口不退出，走老板键同一条路：停自动滚动、异步存进度。点 Dock 图标再打开。
     auto* closeShortcut = new QShortcut(QKeySequence::Close, this);
     connect(closeShortcut, &QShortcut::activated, this, [this] { hideForBoss(); });
@@ -174,6 +180,7 @@ void MainWindow::showForBoss()
     m_bossHidden = false;
     MacWindow::showWithoutActivating(this);
     m_reader->pauseAutoScroll(false);
+    Q_EMIT bossShown();
 }
 
 bool MainWindow::turnPageFromHotkey(bool next)
@@ -490,6 +497,44 @@ void MainWindow::setBookmarkList(const std::vector<Bookmark>& bookmarks)
     }
 }
 
+const ChapterContent* MainWindow::loadedChapter(quint32 index) const
+{
+    return m_hasBook ? m_reader->loadedChapter(index) : nullptr;
+}
+
+quint32 MainWindow::anchorOffset() const
+{
+    return m_reader->byteOffsetInChapter();
+}
+
+void MainWindow::followSpeech(quint32 chapter, quint32 byteStart, quint32 byteEnd)
+{
+    if (!m_hasBook) {
+        return;
+    }
+    if (m_speechMarkOn && byteEnd > byteStart) {
+        m_reader->setSpeechMark(chapter, byteStart, byteEnd - byteStart, m_speechMarkColor);
+    }
+    if (!m_reader->revealByte(chapter, byteStart)) {
+        // 读到的章不在当前文档里（比如用户翻远了），整章换过去。
+        Q_EMIT anchorJumpRequested(chapter, byteStart);
+    }
+}
+
+void MainWindow::setSpeechMarkStyle(bool on, const QColor& color)
+{
+    m_speechMarkOn = on;
+    m_speechMarkColor = color;
+    if (!on) {
+        m_reader->clearSpeechMark();
+    }
+}
+
+void MainWindow::clearSpeechMark()
+{
+    m_reader->clearSpeechMark();
+}
+
 void MainWindow::armHighlight(quint32 chapter, quint32 offset, quint32 bytes)
 {
     m_highlightChapter = chapter;
@@ -528,10 +573,23 @@ void MainWindow::updateStatus()
         return;
     }
     const double percent = m_reader->progressRatio() * 100.0;
-    m_status->setText(QStringLiteral("%1    %2%    %3")
-                          .arg(m_reader->chapterTitle())
-                          .arg(percent, 0, 'f', 1)
-                          .arg(m_pageMode ? QStringLiteral("翻页") : QStringLiteral("滚动")));
+    QString text = QStringLiteral("%1    %2%    %3")
+                       .arg(m_reader->chapterTitle())
+                       .arg(percent, 0, 'f', 1)
+                       .arg(m_pageMode ? QStringLiteral("翻页") : QStringLiteral("滚动"));
+    if (!m_speechStatus.isEmpty()) {
+        text += QStringLiteral("    ") + m_speechStatus;
+    }
+    m_status->setText(text);
+}
+
+void MainWindow::setSpeechStatus(const QString& text)
+{
+    if (m_speechStatus == text) {
+        return;
+    }
+    m_speechStatus = text;
+    updateStatus();
 }
 
 void MainWindow::layoutChildren()
@@ -625,6 +683,26 @@ bool MainWindow::event(QEvent* event)
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_reader->viewport() && event->type() == QEvent::ContextMenu && m_hasBook) {
+        auto* request = static_cast<QContextMenuEvent*>(event);
+        const auto point = m_reader->positionAt(request->pos());
+        if (!point.has_value()) {
+            return true;
+        }
+        QMenu menu(this);
+        QAction* fromHere = menu.addAction(QStringLiteral("从这里开始朗读"));
+        QAction* stop = nullptr;
+        if (m_speechActive) {
+            stop = menu.addAction(QStringLiteral("停止朗读"));
+        }
+        QAction* picked = menu.exec(request->globalPos());
+        if (picked == fromHere) {
+            Q_EMIT speechStartAtRequested(point->chapter, point->byte);
+        } else if (picked != nullptr && picked == stop) {
+            Q_EMIT speechStopRequested();
+        }
+        return true;
+    }
     if (watched == m_reader->viewport() && event->type() == QEvent::MouseButtonPress) {
         auto* mouse = static_cast<QMouseEvent*>(event);
         if (mouse->button() == Qt::LeftButton) {

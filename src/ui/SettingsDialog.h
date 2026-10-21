@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Hotkeys.h"
+#include "app/SpeechSettings.h"
 #include "ui/ReadingStyle.h"
 
 #include <QDialog>
@@ -8,12 +9,16 @@
 class QCheckBox;
 class QComboBox;
 class QFontComboBox;
+class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
 
 namespace moyu {
+
+enum class PreviewState { Idle, Synthesizing, Playing };
 
 // 非模态。滑块拖动时立刻把样式交出去，调用方再决定穿透能不能开。
 class SettingsDialog : public QDialog {
@@ -29,6 +34,9 @@ public:
     void setHideOnBlur(bool on);
     void setHotkey(HotkeyRole role, const HotkeyChord& chord);
     void setChapterPattern(const QString& pattern);
+    void setSpeechSettings(const SpeechSettings& settings);
+    // message 非空时显示在试听按钮旁边，比如失败原因。
+    void setPreviewState(PreviewState state, const QString& message = {});
 
 Q_SIGNALS:
     void appearanceEdited(ReadingStyle style);
@@ -39,6 +47,9 @@ Q_SIGNALS:
     void hideOnBlurChanged(bool on);
     void hotkeyEdited(int role, HotkeyChord chord);
     void hotkeyRejected(QString message);
+    void speechEdited(moyu::SpeechSettings settings);
+    void speechPreviewRequested(QString text);
+    void speechPreviewStopRequested();
 
 protected:
     void hideEvent(QHideEvent* event) override;
@@ -52,6 +63,9 @@ private:
     void syncPresetCombo();
     void updateHotkeyButton(HotkeyRole role);
     void beginRecord(HotkeyRole role);
+    QWidget* buildSpeechPage();
+    void emitSpeech();
+    void updateMarkColorButton();
 
     ReadingStyle m_style;
     bool m_clickThrough = false;
@@ -77,6 +91,18 @@ private:
     QPushButton* m_textColor = nullptr;
     QPushButton* m_hotkeyButtons[4] = {};
     QLineEdit* m_chapterPattern = nullptr;
+
+    SpeechSettings m_speech;
+    QLineEdit* m_apiKey = nullptr;
+    QComboBox* m_voice = nullptr;
+    QLineEdit* m_speechStyle = nullptr;
+    QSlider* m_speechRate = nullptr;
+    QCheckBox* m_speechMark = nullptr;
+    QPushButton* m_markColor = nullptr;
+    QPlainTextEdit* m_previewText = nullptr;
+    QPushButton* m_previewButton = nullptr;
+    QLabel* m_previewStatus = nullptr;
+    PreviewState m_previewState = PreviewState::Idle;
 };
 
 }  // namespace moyu

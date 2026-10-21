@@ -9,6 +9,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -19,6 +20,11 @@ class QTimer;
 namespace moyu {
 
 enum class ReadMode { Scroll, Page };
+
+struct TextPoint {
+    quint32 chapter = 0;
+    quint32 byte = 0;
+};
 
 // 自绘阅读区。滚动模式下把相邻章节拼进同一份文档，滚过边界时只在远端追加或去掉一章。
 // 翻页模式从锚点逐行填满一页，不给整章分页。锚点仍然是「章节号 + 章内字节偏移」。
@@ -52,6 +58,15 @@ public:
     void setHighlight(quint32 chapter, quint32 byteOffset, quint32 length);
     void clearHighlight();
     bool hasHighlight() const { return m_highlight.active; }
+    // 朗读的跟读标记，和搜索高亮分开画，颜色可调。
+    void setSpeechMark(quint32 chapter, quint32 byteOffset, quint32 length, const QColor& color);
+    void clearSpeechMark();
+    bool hasSpeechMark() const { return m_speechMark.active; }
+    // 这段已经在屏幕上就不动；不在就把它所在的行放到顶上。章节没加载返回 false。
+    bool revealByte(quint32 chapter, quint32 byteOffset);
+    const ChapterContent* loadedChapter(quint32 index) const;
+    // viewport 坐标下点到的字。点在空白处取最近的一行。
+    std::optional<TextPoint> positionAt(QPoint viewportPos);
     void setPaintProbe(std::function<void(qint64)> probe);
 
     quint32 byteOffsetInChapter();
@@ -133,13 +148,16 @@ private:
     void appendPiece(ChapterContent content, quint64 chapterByteStart, bool applyLeftover);
     void prependPiece(ChapterContent content, quint64 chapterByteStart);
     int pixelForAnchor();
+    int pixelForByte(int paragraph, quint32 byte);
     quint32 byteAtPixel(int paragraph, int pixel);
     void paintViewport(QPaintEvent* event);
-    void paintHighlight(QPainter& painter, const LayoutEntry& entry, int row, int originY);
+    void paintHighlights(QPainter& painter, const LayoutEntry& entry, int row, int originY);
+    void paintMark(QPainter& painter, const LayoutEntry& entry, int row, int originY, const Highlight& mark, const QColor& color);
     void rebuildPage();
     void turnPage(bool next);
     bool stepLine(int& row, int& line, bool forward);
     quint32 byteForLine(const LayoutEntry& entry, int line) const;
+    std::optional<TextPoint> pointInLine(int row, const LayoutEntry& entry, int line, qreal x) const;
     void updateAutoTimer();
     void placeAnchor(int paragraph, quint32 byte, bool notify);
     // 滚动、翻页、跳转时亮一下，停下约 1 秒后关掉。定时器只在这时创建。
@@ -173,6 +191,8 @@ private:
     QFont m_font;
     ReadMode m_mode = ReadMode::Scroll;
     Highlight m_highlight;
+    Highlight m_speechMark;
+    QColor m_speechMarkColor;
     std::vector<PageLine> m_pageLines;
     bool m_pageHasNext = false;
     int m_pageNextRow = 0;

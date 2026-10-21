@@ -245,6 +245,72 @@ void ReaderView::clearHighlight()
     viewport()->update();
 }
 
+void ReaderView::setSpeechMark(quint32 chapter, quint32 byteOffset, quint32 length, const QColor& color)
+{
+    m_speechMark.active = length > 0;
+    m_speechMark.chapter = chapter;
+    m_speechMark.byte = byteOffset;
+    m_speechMark.length = length;
+    m_speechMarkColor = color;
+    viewport()->update();
+}
+
+void ReaderView::clearSpeechMark()
+{
+    if (!m_speechMark.active) {
+        return;
+    }
+    m_speechMark.active = false;
+    viewport()->update();
+}
+
+const ChapterContent* ReaderView::loadedChapter(quint32 index) const
+{
+    for (const Piece& piece : m_pieces) {
+        if (piece.content.index == index) {
+            return &piece.content;
+        }
+    }
+    return nullptr;
+}
+
+bool ReaderView::revealByte(quint32 chapter, quint32 byteOffset)
+{
+    if (!m_hasDocument || m_rows.empty()) {
+        return false;
+    }
+    int row = -1;
+    const int count = static_cast<int>(m_rows.size());
+    for (int i = 0; i < count; ++i) {
+        const Piece& piece = m_pieces[static_cast<std::size_t>(m_rows[static_cast<std::size_t>(i)].piece)];
+        if (piece.content.index != chapter) {
+            continue;
+        }
+        const Paragraph* source = paragraphForRow(i);
+        if (row < 0 || (source != nullptr && source->byteStart <= byteOffset)) {
+            row = i;
+        }
+    }
+    if (row < 0) {
+        return false;
+    }
+    if (m_mode == ReadMode::Page) {
+        for (const PageLine& line : m_pageLines) {
+            if (line.row == row) {
+                return true;
+            }
+        }
+    } else if (!m_prefix.empty()) {
+        const int top = m_prefix[static_cast<std::size_t>(row)] + pixelForByte(row, byteOffset);
+        const int value = verticalScrollBar()->value();
+        if (top >= value && top + lineHeight() <= value + viewport()->height()) {
+            return true;
+        }
+    }
+    placeAnchor(row, byteOffset, true);
+    return true;
+}
+
 void ReaderView::setPaintProbe(std::function<void(qint64)> probe)
 {
     m_paintProbe = std::move(probe);
@@ -654,7 +720,11 @@ void ReaderView::rebuildPrefix()
 int ReaderView::pixelForAnchor()
 {
     const int last = static_cast<int>(m_heights.size()) - 1;
-    const int paragraph = std::clamp(m_anchorParagraph, 0, std::max(0, last));
+    return pixelForByte(std::clamp(m_anchorParagraph, 0, std::max(0, last)), m_anchorByte);
+}
+
+int ReaderView::pixelForByte(int paragraph, quint32 byte)
+{
     LayoutEntry* entry = layoutParagraph(paragraph);
     if (entry == nullptr || entry->layout == nullptr || entry->utf16ToByte.empty()) {
         return 0;
@@ -662,7 +732,7 @@ int ReaderView::pixelForAnchor()
     int utf16 = 0;
     const int mapSize = static_cast<int>(entry->utf16ToByte.size());
     for (int i = 0; i < mapSize; ++i) {
-        if (entry->utf16ToByte[static_cast<std::size_t>(i)] >= m_anchorByte) {
+        if (entry->utf16ToByte[static_cast<std::size_t>(i)] >= byte) {
             utf16 = i;
             break;
         }
@@ -1106,6 +1176,62 @@ void ReaderView::prependPiece(ChapterContent content, quint64 chapterByteStart)
     m_applyingAnchor = false;
 }
 
+std::optional<TextPoint> ReaderView::positionAt(QPoint viewportPos)
+{
+    if (!m_hasDocument || m_rows.empty()) {
+        return std::nullopt;
+    }
+    const qreal x = viewportPos.x();
+    if (m_mode == ReadMode::Page) {
+        if (m_pageLines.empty()) {
+            rebuildPage();
+        }
+        const PageLine* hit = nullptr;
+        for (const PageLine& line : m_pageLines) {
+            if (hit == nullptr || line.top <= viewportPos.y()) {
+                hit = &line;
+            }
+        }
+        if (hit == nullptr) {
+            return std::nullopt;
+        }
+        const LayoutEntry* entry = layoutParagraph(hit->row);
+        return entry != nullptr ? pointInLine(hit->row, *entry, hit->line, x) : std::nullopt;
+    }
+    if (m_prefix.empty()) {
+        return std::nullopt;
+    }
+    const int y = verticalScrollBar()->value() + viewportPos.y();
+    const int row = paragraphAt(y);
+    const LayoutEntry* entry = layoutParagraph(row);
+    if (entry == nullptr || entry->layout == nullptr || entry->layout->lineCount() == 0) {
+        return std::nullopt;
+    }
+    const int local = y - m_prefix[static_cast<std::size_t>(row)];
+    int line = 0;
+    for (int i = 0; i < entry->layout->lineCount(); ++i) {
+        if (static_cast<int>(std::floor(entry->layout->lineAt(i).y())) <= local) {
+            line = i;
+        }
+    }
+    return pointInLine(row, *entry, line, x);
+}
+
+std::optional<TextPoint> ReaderView::pointInLine(int row, const LayoutEntry& entry, int line, qreal x) const
+{
+    const Piece* piece = pieceForRow(row);
+    if (piece == nullptr || entry.layout == nullptr || entry.utf16ToByte.empty()) {
+        return std::nullopt;
+    }
+    const QTextLine textLine = entry.layout->lineAt(line);
+    if (!textLine.isValid()) {
+        return std::nullopt;
+    }
+    const int last = static_cast<int>(entry.utf16ToByte.size()) - 1;
+    const int utf16 = std::clamp(textLine.xToCursor(x - m_margin), 0, last);
+    return TextPoint{piece->content.index, entry.utf16ToByte[static_cast<std::size_t>(utf16)]};
+}
+
 quint32 ReaderView::byteForLine(const LayoutEntry& entry, int line) const
 {
     if (entry.layout == nullptr || entry.utf16ToByte.empty()) {
@@ -1375,17 +1501,23 @@ void ReaderView::updateAutoTimer()
     }
 }
 
-void ReaderView::paintHighlight(QPainter& painter, const LayoutEntry& entry, int row, int originY)
+void ReaderView::paintHighlights(QPainter& painter, const LayoutEntry& entry, int row, int originY)
 {
-    if (!m_highlight.active || entry.layout == nullptr) {
+    paintMark(painter, entry, row, originY, m_speechMark, m_speechMarkColor);
+    paintMark(painter, entry, row, originY, m_highlight, QColor(255, 196, 60, 140));
+}
+
+void ReaderView::paintMark(QPainter& painter, const LayoutEntry& entry, int row, int originY, const Highlight& mark, const QColor& color)
+{
+    if (!mark.active || entry.layout == nullptr) {
         return;
     }
     const Piece* piece = pieceForRow(row);
-    if (piece == nullptr || piece->content.index != m_highlight.chapter) {
+    if (piece == nullptr || piece->content.index != mark.chapter) {
         return;
     }
-    const quint32 begin = m_highlight.byte;
-    const quint32 end = begin + m_highlight.length;
+    const quint32 begin = mark.byte;
+    const quint32 end = begin + mark.length;
     int utf16Begin = -1;
     int utf16End = -1;
     const int mapSize = std::max(0, static_cast<int>(entry.utf16ToByte.size()) - 1);
@@ -1403,7 +1535,7 @@ void ReaderView::paintHighlight(QPainter& painter, const LayoutEntry& entry, int
     }
     painter.save();
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(255, 196, 60, 140));
+    painter.setBrush(color);
     const int lines = entry.layout->lineCount();
     for (int index = 0; index < lines; ++index) {
         const QTextLine line = entry.layout->lineAt(index);
@@ -1454,7 +1586,7 @@ void ReaderView::paintViewport(QPaintEvent* event)
             if (!line.isValid()) {
                 continue;
             }
-            paintHighlight(painter, *entry, painted.row, painted.top - static_cast<int>(std::floor(line.y())));
+            paintHighlights(painter, *entry, painted.row, painted.top - static_cast<int>(std::floor(line.y())));
             line.draw(&painter, QPointF(m_margin, painted.top - line.y()));
         }
         paintProgressHint(painter);
@@ -1491,7 +1623,7 @@ void ReaderView::paintViewport(QPaintEvent* event)
             }
             LayoutEntry* entry = layoutParagraph(i);
             if (entry != nullptr && entry->layout != nullptr) {
-                paintHighlight(painter, *entry, i, y);
+                paintHighlights(painter, *entry, i, y);
                 entry->layout->draw(&painter, QPointF(m_margin, y));
             }
         }
